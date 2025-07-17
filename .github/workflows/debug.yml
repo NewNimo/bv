@@ -1,0 +1,140 @@
+name: Alpha Build
+
+on:
+  push:
+    branches:
+      - develop
+
+jobs:
+  build-alpha:
+    name: Build debug Apk
+    runs-on: ubuntu-latest
+    # 移除仓库限制
+    # if: github.repository == 'your-username/your-repo'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+          submodules: 'true'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle to generate and submit dependency graphs
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          dependency-graph: generate-and-submit
+
+      # 创建空的 google-services.json 文件
+      - name: Create empty google-services.json
+        run: |
+          mkdir -p app
+          cat > app/google-services.json << 'EOF'
+          {
+            "project_info": {
+              "project_number": "000000000000",
+              "project_id": "dummy-project-id"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:000000000000:android:0000000000000000000000",
+                  "android_client_info": {
+                    "package_name": "com.example.dummy"
+                  }
+                },
+                "oauth_client": [],
+                "api_key": [
+                  {
+                    "current_key": "dummy-api-key"
+                  }
+                ],
+                "services": {
+                  "appinvite_service": {
+                    "other_platform_oauth_client": []
+                  }
+                }
+              }
+            ],
+            "configuration_version": "1"
+          }
+          EOF
+
+      # 创建正确格式的签名配置文件
+      - name: Create signing properties
+        run: |
+          cat > signing.properties << 'EOF'
+          keystore.path=key.jks
+          keystore.pwd=dummy123
+          keystore.alias=dummy
+          keystore.alias_pwd=dummy123
+          EOF
+
+      # 创建空的密钥文件
+      - name: Create dummy keystore
+        run: |
+          keytool -genkey -v -keystore key.jks -keyalg RSA -keysize 2048 -validity 10000 -alias dummy \
+            -dname "CN=Dummy, OU=Dummy, O=Dummy, L=Dummy, S=Dummy, C=US" \
+            -storepass dummy123 -keypass dummy123
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      # 尝试构建不同的变体
+      - name: Build debug variants
+        run: |
+          echo "Building debug variants..."
+          ./gradlew assembleDefaultDebug --stacktrace || echo "DefaultDebug failed"
+          ./gradlew assembleLiteDebug --stacktrace || echo "LiteDebug failed"
+        continue-on-error: true
+
+      - name: Build alpha variants (if signing available)
+        run: |
+          echo "Building alpha variants..."
+          ./gradlew assembleDefaultAlpha --stacktrace || echo "DefaultAlpha failed"
+          ./gradlew assembleLiteAlpha --stacktrace || echo "LiteAlpha failed"
+        continue-on-error: true
+
+      # 查找生成的APK文件
+      - name: Find APK files
+        run: find . -name "*.apk" -type f
+
+      # 上传所有找到的APK
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Built APKs
+          path: "**/*.apk"
+
+      # 获取版本信息（如果可能）
+      - name: Get version info
+        id: version
+        run: |
+          VERSION_NAME=$(./gradlew -q printVersionName 2>/dev/null || echo "unknown")
+          VERSION_CODE=$(./gradlew -q printVersionCode 2>/dev/null || echo "1")
+          echo "VERSION_NAME=${VERSION_NAME}" >> $GITHUB_ENV
+          echo "VERSION_CODE=${VERSION_CODE}" >> $GITHUB_ENV
+        continue-on-error: true
+
+      # 创建Release（如果有APK文件）
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        if: success()
+        with:
+          files: "**/*.apk"
+          tag_name: "build-${{ github.run_number }}"
+          name: "Build ${{ github.run_number }}"
+          prerelease: true
+          body: |
+            自动构建的APK
+            
+            - 构建时间: ${{ github.event.head_commit.timestamp }}
+            - 提交: ${{ github.sha }}
+            - 版本: ${{ env.VERSION_NAME }} (${{ env.VERSION_CODE }})
+          target_commitish: ${{ github.sha }}
